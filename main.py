@@ -13,7 +13,7 @@ from var import VAR
 VQVAE_DIM = 64
 VOCAB_SIZE = 32
 PATCH_SIZES = [1, 2, 3, 4, 8]
-VAR_DIM = 128
+VAR_DIM = 64
 N_HEADS = 4
 N_LAYERS = 6
 
@@ -116,7 +116,6 @@ if __name__ == "__main__":
 
     train_loader, test_loader = get_data(batch_size=1024)
     var_model = var_model.to("cuda")
-
     for epoch in range(100):
         for i, (x, c) in enumerate(train_loader):
             x, c = x.cuda(), c.cuda()
@@ -138,7 +137,7 @@ if __name__ == "__main__":
         if epoch % 5 == 0:
             with torch.no_grad():
                 cond = torch.randint(0, 10, (10,)).cuda()
-                out_B3HW = var_model.generate(cond, 6)
+                out_B3HW = var_model.generate(cond, 0)
                 out_B3HW = out_B3HW * 0.5 + 0.5
                 out_B3HW = out_B3HW.clamp(0, 1)
                 out_B3HW = out_B3HW.cpu().detach().numpy()
