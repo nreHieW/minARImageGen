@@ -42,14 +42,19 @@ def sample(logits: torch.Tensor, temperature: float, top_p: float):
     if temperature == 0.0:
         return torch.argmax(logits, dim=-1)
 
-    probs = torch.softmax(logits[:, -1] / temperature, dim=-1)
+    batch_size, seq_len, vocab_size = logits.shape
+    logits_flat = logits.reshape(-1, vocab_size)
+
+    probs = torch.softmax(logits_flat / temperature, dim=-1)
     probs_sort, probs_idx = torch.sort(probs, dim=-1, descending=True)
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     mask = probs_sum - probs_sort > top_p
     probs_sort[mask] = 0.0
     probs_sort /= probs_sort.sum(dim=-1, keepdim=True)
+
     next_token = torch.multinomial(probs_sort, num_samples=1)
     next_token = torch.gather(probs_idx, -1, next_token)
+    next_token = next_token.reshape(batch_size, seq_len)
     return next_token
 
 

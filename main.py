@@ -3,6 +3,7 @@ import torch.nn.functional as F
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
+import argparse
 import gc
 import wandb
 import datetime
@@ -10,24 +11,51 @@ import datetime
 from vqvae import VQVAE
 from var import VAR
 
-VQVAE_DIM = 64
-VOCAB_SIZE = 32
-PATCH_SIZES = [1, 2, 3, 4, 8]
-VAR_DIM = 64
-N_HEADS = 4
-N_LAYERS = 6
+
+params = {
+    "mnist": {
+        "VQVAE_DIM": 64,
+        "VOCAB_SIZE": 32,
+        "PATCH_SIZES": [1, 2, 3, 4, 8],
+        "VAR_DIM": 64,
+        "N_HEADS": 4,
+        "N_LAYERS": 6,
+        "channels": 1,
+    },
+    "cifar": {
+        "VQVAE_DIM": 128,
+        "VOCAB_SIZE": 256,
+        "PATCH_SIZES": [1, 2, 3, 4, 8],
+        "VAR_DIM": 256,
+        "N_HEADS": 8,
+        "N_LAYERS": 12,
+        "channels": 3,
+    },
+}
 
 
-def get_data(batch_size=1024):
-    transform = transforms.Compose(
-        [
-            transforms.ToTensor(),
-            transforms.Pad(2),
-            transforms.Normalize((0.5,), (0.5,)),
-        ]
-    )
-    train_ds = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
-    test_ds = datasets.MNIST(root="./data", train=False, download=True, transform=transform)
+def get_data(batch_size=1024, use_cifar=False):
+    if use_cifar:
+        transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.RandomCrop(32),
+                transforms.RandomHorizontalFlip(),
+                transforms.Normalize((0.5,), (0.5,)),
+            ]
+        )
+        train_ds = datasets.CIFAR10(root="./data", train=True, download=True, transform=transform)
+        test_ds = datasets.CIFAR10(root="./data", train=False, download=True, transform=transform)
+    else:
+        transform = transforms.Compose(
+            [
+                transforms.ToTensor(),
+                transforms.Pad(2),
+                transforms.Normalize((0.5,), (0.5,)),
+            ]
+        )
+        train_ds = datasets.MNIST(root="./data", train=True, download=True, transform=transform)
+        test_ds = datasets.MNIST(root="./data", train=False, download=True, transform=transform)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=False, drop_last=False)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, drop_last=True)
@@ -36,24 +64,24 @@ def get_data(batch_size=1024):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cifar", action="store_true")
+    args = parser.parse_args()
+    use_cifar = args.cifar
+
+    model_params = params["cifar"] if use_cifar else params["mnist"]
+
     curr_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run = wandb.init(
         project="minvar",
-        name=f"minvar_{curr_time}",
-        config={
-            "VQVAE_DIM": VQVAE_DIM,
-            "VOCAB_SIZE": VOCAB_SIZE,
-            "PATCH_SIZES": PATCH_SIZES,
-            "VAR_DIM": VAR_DIM,
-            "N_HEADS": N_HEADS,
-            "N_LAYERS": N_LAYERS,
-        },
+        name=f"minvar_{curr_time}" + ("_cifar" if use_cifar else "mnist"),
+        config=model_params,
     )
     print("=" * 10 + "Training VQVAE" + "=" * 10)
-    vq_model = VQVAE(VQVAE_DIM, VOCAB_SIZE, PATCH_SIZES, num_channels=1)
+    vq_model = VQVAE(model_params["VQVAE_DIM"], model_params["VOCAB_SIZE"], model_params["PATCH_SIZES"], num_channels=model_params["channels"])
     optimizer = torch.optim.AdamW(vq_model.parameters(), lr=5e-4)
 
-    train_loader, test_loader = get_data(batch_size=8192)
+    train_loader, test_loader = get_data(batch_size=4096, use_cifar=use_cifar)
     vq_model = vq_model.to("cuda")
     for epoch in range(75):
         for i, (x, c) in enumerate(train_loader):
@@ -103,7 +131,7 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
 
     print("=" * 10 + "Training VAR" + "=" * 10)
-    vqvae = VQVAE(VQVAE_DIM, VOCAB_SIZE, PATCH_SIZES, num_channels=1)
+    vqvae = VQVAE(model_params["VQVAE_DIM"], model_params["VOCAB_SIZE"], model_params["PATCH_SIZES"], num_channels=model_params["channels"])
     vqvae.load_state_dict(torch.load("vqvae.pth"))
     vqvae = vqvae.to("cuda")
     vqvae.eval()
@@ -111,10 +139,10 @@ if __name__ == "__main__":
     for param in vqvae.parameters():
         param.requires_grad = False
 
-    var_model = VAR(vqvae, dim=VAR_DIM, n_heads=N_HEADS, n_layers=N_LAYERS, patch_sizes=PATCH_SIZES, n_classes=10)
+    var_model = VAR(vqvae=vqvae, dim=model_params["VAR_DIM"], n_heads=model_params["N_HEADS"], n_layers=model_params["N_LAYERS"], patch_sizes=model_params["PATCH_SIZES"], n_classes=10)
     optimizer = torch.optim.AdamW(var_model.parameters(), lr=3e-4)
 
-    train_loader, test_loader = get_data(batch_size=1024)
+    train_loader, test_loader = get_data(batch_size=512, use_cifar=use_cifar)
     var_model = var_model.to("cuda")
     for epoch in range(100):
         for i, (x, c) in enumerate(train_loader):
