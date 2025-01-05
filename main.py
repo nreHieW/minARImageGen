@@ -25,11 +25,11 @@ params = {
     },
     "cifar": {
         "VQVAE_DIM": 128,
-        "VOCAB_SIZE": 256,
-        "PATCH_SIZES": [1, 2, 3, 4, 8],
+        "VOCAB_SIZE": 512,
+        "PATCH_SIZES": [1, 2, 3, 4, 6, 8],
         "VAR_DIM": 256,
         "N_HEADS": 8,
-        "N_LAYERS": 12,
+        "N_LAYERS": 10,
         "channels": 3,
     },
 }
@@ -105,30 +105,40 @@ if __name__ == "__main__":
     vq_model = vq_model.to("cuda")
     for epoch in range(75):
         epoch_loss = 0
+        epoch_recon_loss = 0
         for i, (x, c) in enumerate(train_loader):
             x, c = x.cuda(), c.cuda()
             optimizer.zero_grad()
             xhat, r_maps, idxs, scales, q_loss = vq_model(x)
-            loss = F.mse_loss(xhat, x) + q_loss
+            recon_loss = F.mse_loss(xhat, x)
+            loss = recon_loss + q_loss
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()
+            epoch_recon_loss += recon_loss.item()
 
         epoch_loss /= len(train_loader)
-        print(f"Epoch: {epoch}, Loss: {epoch_loss}")
-        wandb.log({"vqvae_train_loss": epoch_loss})
+        epoch_recon_loss /= len(train_loader)
+        print(f"Epoch: {epoch}, Loss: {epoch_loss}, Recon Loss: {epoch_recon_loss}")
+        wandb.log({"vqvae_train_loss": epoch_loss, "vqvae_recon_loss": epoch_recon_loss})
 
         if epoch % 5 == 0:
             with torch.no_grad():
                 total_loss = 0
+                total_recon_loss = 0
                 for i, (x, c) in enumerate(test_loader):
                     x, c = x.cuda(), c.cuda()
                     xhat, r_maps, idxs, scales, q_loss = vq_model(x)
-                    loss = F.mse_loss(xhat, x) + q_loss
+                    recon_loss = F.mse_loss(xhat, x)
+                    loss = recon_loss + q_loss
                     total_loss += loss.item()
+                    total_recon_loss += recon_loss.item()
 
-                print(f"Epoch: {epoch}, Test Loss: {total_loss / len(test_loader)}")
-                wandb.log({"vqvae_test_loss": total_loss / len(test_loader)})
+                total_loss /= len(test_loader)
+                total_recon_loss /= len(test_loader)
+
+                print(f"Epoch: {epoch}, Test Loss: {total_loss}, Test Recon Loss: {total_recon_loss}")
+                wandb.log({"vqvae_test_loss": total_loss, "vqvae_test_recon_loss": total_recon_loss})
 
                 x = x[:10, :].cuda()
                 x_hat = vq_model(x)[0]

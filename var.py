@@ -204,7 +204,7 @@ class VAR(nn.Module):
         return logits_BLC
 
     @torch.no_grad()
-    def generate(self, cond: torch.LongTensor, cfg_scale: float, temperature: float = 0.0, top_p: float = 1.0) -> torch.Tensor:
+    def generate(self, cond: torch.LongTensor, cfg_scale: float, temperature: float = 0.5, top_p: float = 0.5) -> torch.Tensor:
         bs = cond.shape[0]
         B = bs * 2  # for classifier free guidance
         out_bCHW = torch.zeros(bs, self.latent_dim, self.final_patch_size, self.final_patch_size).to(cond.device)
@@ -231,8 +231,8 @@ class VAR(nn.Module):
             # logits_blV = cond_out_blV
             logits_blV = (1 + cfg) * logits_BlV[:bs] - cfg * logits_BlV[bs:]
 
-            idx_bl = torch.argmax(logits_blV, dim=-1)
-            # idx_bl = sample(logits_blV, temperature, top_p)
+            # idx_bl = torch.argmax(logits_blV, dim=-1)
+            idx_bl = sample(logits_blV, temperature, top_p)
             idx_bhw = idx_bl.view(bs, patch_size, patch_size)
 
             zq_bChw = self.vqvae.get_nearest_embedding(idx_bhw).permute(0, 3, 1, 2)
