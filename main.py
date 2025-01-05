@@ -1,6 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torchvision import datasets, transforms
+from torchvision.utils import make_grid
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import argparse
@@ -63,6 +64,25 @@ def get_data(batch_size=1024, use_cifar=False):
     return train_loader, test_loader
 
 
+def plot_images(pred, original=None):
+    n = pred.size(0)
+    pred = pred * 0.5 + 0.5
+    pred = pred.clamp(0, 1)
+    img = pred.cpu().detach()
+
+    if original is not None:
+        original = original * 0.5 + 0.5
+        original = original.clamp(0, 1)
+        original = original.cpu().detach()
+        img = torch.cat([original, img], dim=0)
+
+    img_grid = make_grid(img, nrow=n)
+    img_grid = img_grid.permute(1, 2, 0).numpy()
+    img_grid = (img_grid * 255).astype("uint8")
+    plt.imshow(img_grid)
+    plt.axis("off")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--cifar", action="store_true")
@@ -84,6 +104,7 @@ if __name__ == "__main__":
     train_loader, test_loader = get_data(batch_size=4096, use_cifar=use_cifar)
     vq_model = vq_model.to("cuda")
     for epoch in range(75):
+        epoch_loss = 0
         for i, (x, c) in enumerate(train_loader):
             x, c = x.cuda(), c.cuda()
             optimizer.zero_grad()
@@ -91,10 +112,11 @@ if __name__ == "__main__":
             loss = F.mse_loss(xhat, x) + q_loss
             loss.backward()
             optimizer.step()
+            epoch_loss += loss.item()
 
-            if i % 10 == 0:
-                print(f"Epoch: {epoch}, Iteration: {i}, Loss: {loss.item()}")
-                wandb.log({"vqvae_train_loss": loss.item()})
+        epoch_loss /= len(train_loader)
+        print(f"Epoch: {epoch}, Loss: {epoch_loss}")
+        wandb.log({"vqvae_train_loss": epoch_loss})
 
         if epoch % 5 == 0:
             with torch.no_grad():
@@ -111,17 +133,9 @@ if __name__ == "__main__":
                 x = x[:10, :].cuda()
                 x_hat = vq_model(x)[0]
 
-                x = x.cpu()
-                x_hat = x_hat * 0.5 + 0.5
-                x_hat = x_hat.clamp(0, 1)
-                x_hat = x_hat.cpu().detach().numpy()
-                fig, axs = plt.subplots(2, 10, figsize=(10, 2))
-                for i in range(10):
-                    axs[0, i].imshow(x[i, 0], cmap="gray")
-                    axs[1, i].imshow(x_hat[i, 0], cmap="gray")
-
-                fig.savefig(f"vqvae_{epoch}.png")
-                plt.close(fig)
+                plot_images(pred=x_hat, original=x)
+                plt.savefig(f"vqvae_{epoch}.png")
+                plt.close()
                 wandb.log({"vqvae_images": wandb.Image(f"vqvae_{epoch}.png")})
 
     torch.save(vq_model.state_dict(), "vqvae.pth")
@@ -142,9 +156,13 @@ if __name__ == "__main__":
     var_model = VAR(vqvae=vqvae, dim=model_params["VAR_DIM"], n_heads=model_params["N_HEADS"], n_layers=model_params["N_LAYERS"], patch_sizes=model_params["PATCH_SIZES"], n_classes=10)
     optimizer = torch.optim.AdamW(var_model.parameters(), lr=3e-4)
 
+    print(f"VQVAE Parameters: {sum(p.numel() for p in vqvae.parameters())/1e6:.2f}M")
+    print(f"VAR Parameters: {sum(p.numel() for p in var_model.parameters())/1e6:.2f}M")
+
     train_loader, test_loader = get_data(batch_size=512, use_cifar=use_cifar)
     var_model = var_model.to("cuda")
     for epoch in range(100):
+        epoch_loss = 0
         for i, (x, c) in enumerate(train_loader):
             x, c = x.cuda(), c.cuda()
             optimizer.zero_grad()
@@ -158,24 +176,20 @@ if __name__ == "__main__":
             loss.backward()
             optimizer.step()
 
-            if i % 10 == 0:
-                print(f"Epoch: {epoch}, Iteration: {i}, Loss: {loss.item()}")
-                wandb.log({"var_train_loss": loss.item()})
+            epoch_loss += loss.item()
+
+        epoch_loss /= len(train_loader)
+        print(f"Epoch: {epoch}, Loss: {epoch_loss}")
+        wandb.log({"var_train_loss": epoch_loss})
 
         if epoch % 5 == 0:
             with torch.no_grad():
                 cond = torch.randint(0, 10, (10,)).cuda()
                 out_B3HW = var_model.generate(cond, 0)
-                out_B3HW = out_B3HW * 0.5 + 0.5
-                out_B3HW = out_B3HW.clamp(0, 1)
-                out_B3HW = out_B3HW.cpu().detach().numpy()
+                plot_images(pred=out_B3HW)
 
-                fig, axs = plt.subplots(1, 10, figsize=(10, 1))
-                for i in range(10):
-                    axs[i].imshow(out_B3HW[i, 0], cmap="gray")
-
-                fig.savefig(f"var_{epoch}.png")
-                plt.close(fig)
+                plt.savefig(f"var_{epoch}.png")
+                plt.close()
                 wandb.log({"var_images": wandb.Image(f"var_{epoch}.png")})
 
     torch.save(var_model.state_dict(), "var.pth")
