@@ -39,7 +39,7 @@ training_params = {
         "VQVAE": {
             "batch_size": 2048,
             "lr": 3e-4,
-            "epochs": 75,
+            "epochs": 40,
         },
         "VAR": {
             "batch_size": 1024,
@@ -49,9 +49,9 @@ training_params = {
     },
     "cifar": {
         "VQVAE": {
-            "batch_size": 512,
+            "batch_size": 2048,
             "lr": 5e-4,
-            "epochs": 100,
+            "epochs": 40,
         },
         "VAR": {
             "batch_size": 256,
