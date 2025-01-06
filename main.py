@@ -13,7 +13,7 @@ from vqvae import VQVAE
 from var import VAR
 
 
-params = {
+model_params = {
     "mnist": {
         "VQVAE_DIM": 64,
         "VOCAB_SIZE": 32,
@@ -31,6 +31,33 @@ params = {
         "N_HEADS": 8,
         "N_LAYERS": 10,
         "channels": 3,
+    },
+}
+
+training_params = {
+    "mnist": {
+        "VQVAE": {
+            "batch_size": 2048,
+            "lr": 3e-4,
+            "epochs": 75,
+        },
+        "VAR": {
+            "batch_size": 1024,
+            "lr": 1e-3,
+            "epochs": 100,
+        },
+    },
+    "cifar": {
+        "VQVAE": {
+            "batch_size": 512,
+            "lr": 5e-4,
+            "epochs": 100,
+        },
+        "VAR": {
+            "batch_size": 256,
+            "lr": 1e-3,
+            "epochs": 100,
+        },
     },
 }
 
@@ -89,7 +116,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     use_cifar = args.cifar
 
-    model_params = params["cifar"] if use_cifar else params["mnist"]
+    model_params = model_params["cifar"] if use_cifar else model_params["mnist"]
+    training_params = training_params["cifar"] if use_cifar else training_params["mnist"]
 
     curr_time = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run = wandb.init(
@@ -99,11 +127,11 @@ if __name__ == "__main__":
     )
     print("=" * 10 + "Training VQVAE" + "=" * 10)
     vq_model = VQVAE(model_params["VQVAE_DIM"], model_params["VOCAB_SIZE"], model_params["PATCH_SIZES"], num_channels=model_params["channels"])
-    optimizer = torch.optim.AdamW(vq_model.parameters(), lr=5e-4)
+    optimizer = torch.optim.AdamW(vq_model.parameters(), lr=training_params["VQVAE"]["lr"])
 
-    train_loader, test_loader = get_data(batch_size=4096, use_cifar=use_cifar)
+    train_loader, test_loader = get_data(batch_size=training_params["VQVAE"]["batch_size"], use_cifar=use_cifar)
     vq_model = vq_model.to("cuda")
-    for epoch in range(75):
+    for epoch in range(training_params["VQVAE"]["epochs"]):
         epoch_loss = 0
         epoch_recon_loss = 0
         for i, (x, c) in enumerate(train_loader):
@@ -164,14 +192,14 @@ if __name__ == "__main__":
         param.requires_grad = False
 
     var_model = VAR(vqvae=vqvae, dim=model_params["VAR_DIM"], n_heads=model_params["N_HEADS"], n_layers=model_params["N_LAYERS"], patch_sizes=model_params["PATCH_SIZES"], n_classes=10)
-    optimizer = torch.optim.AdamW(var_model.parameters(), lr=3e-4)
+    optimizer = torch.optim.AdamW(var_model.parameters(), lr=training_params["VAR"]["lr"])
 
     print(f"VQVAE Parameters: {sum(p.numel() for p in vqvae.parameters())/1e6:.2f}M")
     print(f"VAR Parameters: {sum(p.numel() for p in var_model.parameters())/1e6:.2f}M")
 
-    train_loader, test_loader = get_data(batch_size=512, use_cifar=use_cifar)
+    train_loader, test_loader = get_data(batch_size=training_params["VAR"]["batch_size"], use_cifar=use_cifar)
     var_model = var_model.to("cuda")
-    for epoch in range(100):
+    for epoch in range(training_params["VAR"]["epochs"]):
         epoch_loss = 0
         for i, (x, c) in enumerate(train_loader):
             x, c = x.cuda(), c.cuda()
