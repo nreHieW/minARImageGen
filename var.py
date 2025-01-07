@@ -204,7 +204,7 @@ class VAR(nn.Module):
         return logits_BLC
 
     @torch.no_grad()
-    def generate(self, cond: torch.LongTensor, cfg_scale: float, temperature: float = 0.5, top_p: float = 0.5) -> torch.Tensor:
+    def generate(self, cond: torch.LongTensor, cfg_scale: float, temperature: float = 0.1, top_p: float = 0.35) -> torch.Tensor:
         bs = cond.shape[0]
         B = bs * 2  # for classifier free guidance
         out_bCHW = torch.zeros(bs, self.latent_dim, self.final_patch_size, self.final_patch_size).to(cond.device)

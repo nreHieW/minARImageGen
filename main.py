@@ -29,7 +29,7 @@ model_params = {
         "PATCH_SIZES": [1, 2, 3, 4, 6, 8],
         "VAR_DIM": 256,
         "N_HEADS": 8,
-        "N_LAYERS": 10,
+        "N_LAYERS": 11,
         "channels": 3,
     },
 }
@@ -56,7 +56,7 @@ training_params = {
         "VAR": {
             "batch_size": 512,
             "lr": 2e-3,
-            "epochs": 200,
+            "epochs": 100,
         },
     },
 }
