@@ -50,13 +50,13 @@ training_params = {
     "cifar": {
         "VQVAE": {
             "batch_size": 2048,
-            "lr": 5e-4,
-            "epochs": 40,
+            "lr": 3e-4,
+            "epochs": 60,
         },
         "VAR": {
-            "batch_size": 256,
-            "lr": 1e-3,
-            "epochs": 100,
+            "batch_size": 512,
+            "lr": 2e-3,
+            "epochs": 200,
         },
     },
 }
@@ -222,7 +222,8 @@ if __name__ == "__main__":
 
         if epoch % 5 == 0:
             with torch.no_grad():
-                cond = torch.randint(0, 10, (10,)).cuda()
+
+                cond = torch.arange(10).cuda()
                 out_B3HW = var_model.generate(cond, 0)
                 plot_images(pred=out_B3HW)
 
