@@ -38,9 +38,9 @@ python main.py --cifar
 > Change the model and training params in `main.py` as required 
 
 ## Discussion 
-The architecture implemented here is a little different from the one in the paper. The VAVAE is just a simple convolution network. The transformer mainly follows the [Noam Transformer](https://gist.github.com/nreHieW/a4ae05d216c5326c9fb9a70fcdda3274) with adaptive normilization (from [DiT](https://arxiv.org/abs/2212.09748)) - Rotary Positional Embedding and SWIGLU mainly. For simplicity, attention is still standard Multi-Head Attention. The VQVAE is also trained on standard codebook, commitment and reconstruction losses without the perceptual and GAN loss terms that is standard.
+The architecture implemented here is a little different from the one in the paper. The VAVAE is just a simple convolution network. The transformer mainly follows the [Noam Transformer](https://gist.github.com/nreHieW/a4ae05d216c5326c9fb9a70fcdda3274) with adaptive normilization (from [DiT](https://arxiv.org/abs/2212.09748)) - Rotary Positional Embedding and SWIGLU mainly. This implementation also doens't have Attention Norms. For simplicity, attention is still standard Multi-Head Attention. The VQVAE is also trained on standard codebook, commitment and reconstruction losses without the perceptual and GAN loss terms that is standard.
 
-The performance on CIFAR is not as good compared to MNIST. My hypothesis is that the the encoder-decoder of the VQVAE just isn't good enough. The codebook is not representative enough. As a result, while training loss on VAR has yet to converge, the samples tend to get worse. 
+The performance on CIFAR is not as good compared to MNIST. My hypothesis is that the the encoder-decoder of the VQVAE just isn't good enough. The codebook is not representative enough. As a result, while training loss on VAR has yet to converge, the samples tend to get worse. CFG is also another area for future work, my guess is that it isn't trained enough to make full use of CFG. 
 
 
 ### Acknowledgements
