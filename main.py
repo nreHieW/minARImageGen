@@ -9,8 +9,8 @@ import gc
 import wandb
 import datetime
 
-from vqvae import VQVAE
-from var import VAR
+from modelling.vqvae import VQVAE
+from modelling.var import VAR
 
 
 model_params = {

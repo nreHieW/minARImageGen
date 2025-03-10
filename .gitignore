@@ -1,4 +1,6 @@
 __pycache__/
-data/
+data/train/
+data/test/
+data/validation/
 *.ipynb
 *.pth
