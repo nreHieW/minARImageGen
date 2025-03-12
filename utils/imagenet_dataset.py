@@ -54,7 +54,8 @@ def get_imagenet_dataloader(
     rank: int,
     world_size: int,
     data_dir: str = "data/",
-    batch_size: int = 12,
+    train_batch_size: int = 12,
+    val_batch_size: int = 12,
     num_workers: int = 4,
     shuffle: bool = True,
 ):
@@ -64,8 +65,8 @@ def get_imagenet_dataloader(
     train_sampler = DistributedSampler(train_ds, num_replicas=world_size, rank=rank, shuffle=shuffle)
     val_sampler = DistributedSampler(val_ds, num_replicas=world_size, rank=rank, shuffle=shuffle)
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=train_sampler, num_workers=num_workers, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, sampler=val_sampler, num_workers=num_workers, pin_memory=True)
+    train_loader = DataLoader(train_ds, batch_size=train_batch_size, sampler=train_sampler, num_workers=num_workers, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=val_batch_size, sampler=val_sampler, num_workers=num_workers, pin_memory=True)
 
     return train_loader, val_loader
 
