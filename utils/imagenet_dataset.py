@@ -13,15 +13,23 @@ class ImageNetDataset(Dataset):
         split: str = "train",
     ):
         self.root_dir = os.path.join(root_dir, split)
-        self.transform = transforms.Compose(
-            [
-                transforms.Resize(256, interpolation=InterpolationMode.LANCZOS),
-                transforms.CenterCrop((256, 256)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-            ]
-        )
-
+        if split == "train":
+            self.transform = transforms.Compose(
+                [
+                    transforms.RandomResizedCrop((256, 256), scale=(0.8, 1.0), ratio=(0.8, 1.2)),
+                    transforms.RandomHorizontalFlip(),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ]
+            )
+        else:
+            self.transform = transforms.Compose(
+                [
+                    transforms.Resize((256, 256), interpolation=InterpolationMode.LANCZOS),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ]
+            )
         self.samples = []
         self.targets = []
         self.classes = sorted(os.listdir(self.root_dir))

@@ -38,6 +38,7 @@ class VectorQuantizer(nn.Module):
         self.phis = PhiPartiallyShared(dim, residual_ratio, num_phi)
         self.codebook = nn.Embedding(self.vocab_size, dim)
         self.codebook.weight.data.uniform_(-1 / self.vocab_size, 1 / self.vocab_size)
+        self.codebook.weight.data = F.normalize(self.codebook.weight.data, dim=1)
 
     def forward(self, f_BCHW: torch.Tensor):
         r_R_BChw, idx_R_BL, zqs_post_conv_R_BCHW = self.encode(f_BCHW)
@@ -49,16 +50,21 @@ class VectorQuantizer(nn.Module):
         r_R_BChw = []
         idx_R_BL = []
         zqs_post_conv_R_BCHW = []
+        codebook = F.normalize(self.codebook.weight, dim=1)
         for resolution_idx, resolution_k in enumerate(self.resolutions):
             r_BChw = F.interpolate(f_BCHW, (resolution_k, resolution_k), mode="area")
             r_flattened_NC = r_BChw.permute(0, 2, 3, 1).reshape(-1, self.dim).contiguous()
-            dist = r_flattened_NC.pow(2).sum(1, keepdim=True) + self.codebook.weight.data.pow(2).sum(1) - 2 * r_flattened_NC @ self.codebook.weight.data.T
+            # dist = r_flattened_NC.pow(2).sum(1, keepdim=True) + self.codebook.weight.data.pow(2).sum(1) - 2 * r_flattened_NC @ self.codebook.weight.data.T
+            r_flattened_NC = F.normalize(r_flattened_NC, dim=1)
+            dist = r_flattened_NC @ codebook.T
+            idx_Bhw = torch.argmax(dist, dim=1).view(B, resolution_k, resolution_k)
 
-            idx_Bhw = torch.argmin(dist, dim=1).view(B, resolution_k, resolution_k)
+            # idx_Bhw = torch.argmin(dist, dim=1).view(B, resolution_k, resolution_k)
             idx_R_BL.append(idx_Bhw.reshape(B, -1))
             r_R_BChw.append(r_BChw)
 
-            zq_BChw = self.codebook(idx_Bhw).permute(0, 3, 1, 2).contiguous()
+            # zq_BChw = self.codebook(idx_Bhw).permute(0, 3, 1, 2).contiguous()
+            zq_BChw = codebook[idx_Bhw].reshape(B, resolution_k, resolution_k, self.dim).permute(0, 3, 1, 2).contiguous()
             zq_BCHW = F.interpolate(zq_BChw, size=(H, W), mode="bicubic")
             phi_idx = resolution_idx / (len(self.resolutions) - 1)
             zq_BCHW = self.phis(zq_BCHW, phi_idx)

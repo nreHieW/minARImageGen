@@ -11,12 +11,12 @@ from .quant import VectorQuantizer
 
 @dataclass
 class VQVAEConfig:
-    resolution: int
     in_channels: int
     dim: int
     ch_mult: list[int]
     num_res_blocks: int
     z_channels: int
+    codebook_dim: int
     out_ch: int
     vocab_size: int
     patch_sizes: list[int]
@@ -107,7 +107,6 @@ class Upsample(nn.Module):
 class Encoder(nn.Module):
     def __init__(
         self,
-        resolution: int,
         in_channels: int,
         ch: int,
         ch_mult: list[int],
@@ -118,11 +117,9 @@ class Encoder(nn.Module):
         self.ch = ch
         self.num_resolutions = len(ch_mult)
         self.num_res_blocks = num_res_blocks
-        self.resolution = resolution
         self.in_channels = in_channels
         self.conv_in = nn.Conv2d(in_channels, self.ch, kernel_size=3, stride=1, padding=1)
 
-        curr_res = resolution
         in_ch_mult = (1,) + tuple(ch_mult)
         self.in_ch_mult = in_ch_mult
         self.down = nn.ModuleList()
@@ -135,12 +132,13 @@ class Encoder(nn.Module):
             for _ in range(self.num_res_blocks):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out))
                 block_in = block_out
+                if i_level == self.num_resolutions - 1:
+                    attn.append(AttnBlock(block_in))
             down = nn.Module()
             down.block = block
             down.attn = attn
             if i_level != self.num_resolutions - 1:
                 down.downsample = Downsample(block_in)
-                curr_res = curr_res // 2
             self.down.append(down)
         self.mid = nn.Module()
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in)
@@ -148,6 +146,7 @@ class Encoder(nn.Module):
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in)
         self.norm_out = nn.GroupNorm(num_groups=32, num_channels=block_in, eps=1e-6, affine=True)
         self.conv_out = nn.Conv2d(block_in, z_channels, kernel_size=3, stride=1, padding=1)
+        self.encoder_output_dim = block_in
 
     def forward(self, x: Tensor) -> Tensor:
         h = self.conv_in(x)
@@ -175,19 +174,14 @@ class Decoder(nn.Module):
         ch_mult: list[int],
         num_res_blocks: int,
         in_channels: int,
-        resolution: int,
         z_channels: int,
     ):
         super().__init__()
         self.ch = ch
         self.num_resolutions = len(ch_mult)
         self.num_res_blocks = num_res_blocks
-        self.resolution = resolution
         self.in_channels = in_channels
-        self.ffactor = 2 ** (self.num_resolutions - 1)
         block_in = ch * ch_mult[self.num_resolutions - 1]
-        curr_res = resolution // 2 ** (self.num_resolutions - 1)
-        self.z_shape = (1, z_channels, curr_res, curr_res)
 
         self.conv_in = nn.Conv2d(z_channels, block_in, kernel_size=3, stride=1, padding=1)
 
@@ -204,12 +198,13 @@ class Decoder(nn.Module):
             for _ in range(self.num_res_blocks + 1):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out))
                 block_in = block_out
+                if i_level == self.num_resolutions - 1:
+                    attn.append(AttnBlock(block_in))
             up = nn.Module()
             up.block = block
             up.attn = attn
             if i_level != 0:
                 up.upsample = Upsample(block_in)
-                curr_res = curr_res * 2
             self.up.insert(0, up)  # prepend to get consistent order
 
         self.norm_out = nn.GroupNorm(num_groups=32, num_channels=block_in, eps=1e-6, affine=True)
@@ -238,21 +233,24 @@ class VQVAE(nn.Module):
     def __init__(self, config: VQVAEConfig):
         super().__init__()
         self.config = config
-        self.encoder = Encoder(resolution=config.resolution, in_channels=config.in_channels, ch=config.dim, ch_mult=config.ch_mult, num_res_blocks=config.num_res_blocks, z_channels=config.z_channels)
+        self.encoder = Encoder(in_channels=config.in_channels, ch=config.dim, ch_mult=config.ch_mult, num_res_blocks=config.num_res_blocks, z_channels=config.z_channels)
         self.decoder = Decoder(
             ch=config.dim,
             out_ch=config.out_ch,
             ch_mult=config.ch_mult,
             num_res_blocks=config.num_res_blocks,
             in_channels=config.in_channels,
-            resolution=config.resolution,
             z_channels=config.z_channels,
         )
-        self.quantizer = VectorQuantizer(vocab_size=config.vocab_size, dim=config.z_channels, patch_sizes=config.patch_sizes)
+        self.quantizer = VectorQuantizer(vocab_size=config.vocab_size, dim=config.codebook_dim, patch_sizes=config.patch_sizes)
+        self.quant_conv = nn.Conv2d(config.z_channels, config.codebook_dim, kernel_size=1, stride=1, padding=0)
+        self.post_quant_conv = nn.Conv2d(config.codebook_dim, config.z_channels, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x):
         f = self.encoder(x)
+        f = self.quant_conv(f)
         fhat, r_maps, idxs, scales, loss = self.quantizer(f)
+        fhat = self.post_quant_conv(fhat)
         x_hat = self.decoder(fhat)
         return x_hat, r_maps, idxs, scales, loss
 
@@ -274,14 +272,14 @@ class VQVAE(nn.Module):
 if __name__ == "__main__":
     patch_sizes = [1, 2, 3, 4, 5, 6, 8, 10, 13, 16, 32]
     config = VQVAEConfig(
-        resolution=256,
         in_channels=3,
         dim=128,
-        ch_mult=[1, 2, 4, 4],
+        ch_mult=[1, 1, 2, 2, 4],
         num_res_blocks=2,
-        z_channels=64,
+        z_channels=256,
+        codebook_dim=8,
         out_ch=3,
-        vocab_size=8192,
+        vocab_size=16384,
         patch_sizes=patch_sizes,
     )
 
@@ -289,12 +287,13 @@ if __name__ == "__main__":
     print(model)
     image = torch.randn((1, 3, 256, 256), requires_grad=True)
     xhat, r_maps, idxs, scales, loss = model(image)
+    total_tokens = sum(len(idx) for idx in idxs)
     assert xhat.shape == image.shape, f"Expected shape {image.shape} but got {xhat.shape}"
     assert len(r_maps) == len(idxs) == len(patch_sizes)
     loss = loss + F.mse_loss(xhat, torch.randn_like(xhat))
     loss.backward()
     assert image.grad is not None
-    for param in model.parameters():
-        assert param.grad is not None
+    for n, param in model.named_parameters():
+        assert param.grad is not None, f"Parameter {n} has no gradient"
     print("Success")
     print("Number of parameters:", sum(p.numel() for p in model.parameters()) / 1e6, "M")
