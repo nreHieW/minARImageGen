@@ -2,10 +2,9 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from einops import rearrange
 from torch import Tensor
 from dataclasses import dataclass
-
+from .layers import AttnBlock4D, swish
 from .quant import VectorQuantizer
 
 
@@ -20,37 +19,6 @@ class VQVAEConfig:
     out_ch: int
     vocab_size: int
     patch_sizes: list[int]
-
-
-def swish(x: Tensor) -> Tensor:
-    return x * torch.sigmoid(x)
-
-
-class AttnBlock(nn.Module):
-    def __init__(self, in_channels: int):
-        super().__init__()
-        self.in_channels = in_channels
-
-        self.norm = nn.GroupNorm(num_groups=32, num_channels=in_channels, eps=1e-6, affine=True)
-
-        self.q = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.k = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.v = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-        self.proj_out = nn.Conv2d(in_channels, in_channels, kernel_size=1)
-
-    def forward(self, x_BCHW: Tensor) -> Tensor:
-        x_BCHW = self.norm(x_BCHW)
-        q_BCHW = self.q(x_BCHW)
-        k_BCHW = self.k(x_BCHW)
-        v_BCHW = self.v(x_BCHW)
-
-        B, C, H, W = x_BCHW.shape
-        q_B1HWC = rearrange(q_BCHW, "b c h w -> b 1 (h w) c").contiguous()
-        k_B1HWC = rearrange(k_BCHW, "b c h w -> b 1 (h w) c").contiguous()
-        v_B1HWC = rearrange(v_BCHW, "b c h w -> b 1 (h w) c").contiguous()
-        h_B1HWC = F.scaled_dot_product_attention(q_B1HWC, k_B1HWC, v_B1HWC)
-        h_BCHW = rearrange(h_B1HWC, "b 1 (h w) c -> b c h w", h=H, w=W, c=C, b=B).contiguous()
-        return x_BCHW + self.proj_out(h_BCHW)
 
 
 class ResnetBlock(nn.Module):
@@ -133,7 +101,7 @@ class Encoder(nn.Module):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out))
                 block_in = block_out
                 if i_level == self.num_resolutions - 1:
-                    attn.append(AttnBlock(block_in))
+                    attn.append(AttnBlock4D(block_in))
             down = nn.Module()
             down.block = block
             down.attn = attn
@@ -142,7 +110,7 @@ class Encoder(nn.Module):
             self.down.append(down)
         self.mid = nn.Module()
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in)
-        self.mid.attn_1 = AttnBlock(block_in)
+        self.mid.attn_1 = AttnBlock4D(block_in)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in)
         self.norm_out = nn.GroupNorm(num_groups=32, num_channels=block_in, eps=1e-6, affine=True)
         self.conv_out = nn.Conv2d(block_in, z_channels, kernel_size=3, stride=1, padding=1)
@@ -187,7 +155,7 @@ class Decoder(nn.Module):
 
         self.mid = nn.Module()
         self.mid.block_1 = ResnetBlock(in_channels=block_in, out_channels=block_in)
-        self.mid.attn_1 = AttnBlock(block_in)
+        self.mid.attn_1 = AttnBlock4D(block_in)
         self.mid.block_2 = ResnetBlock(in_channels=block_in, out_channels=block_in)
 
         self.up = nn.ModuleList()
@@ -199,7 +167,7 @@ class Decoder(nn.Module):
                 block.append(ResnetBlock(in_channels=block_in, out_channels=block_out))
                 block_in = block_out
                 if i_level == self.num_resolutions - 1:
-                    attn.append(AttnBlock(block_in))
+                    attn.append(AttnBlock4D(block_in))
             up = nn.Module()
             up.block = block
             up.attn = attn

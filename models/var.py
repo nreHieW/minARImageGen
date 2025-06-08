@@ -4,7 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from modelling.vqvae import VQVAE
+from .vqvae import VQVAE
+from .layers import FeedForwardGLU, Attention
 
 
 def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
@@ -58,62 +59,13 @@ def sample(logits: torch.Tensor, temperature: float, top_p: float):
     return next_token
 
 
-class FeedForward(nn.Module):
-    def __init__(self, dim: int, hidden_dim: int = None):
-        super().__init__()
-        if hidden_dim is None:
-            hidden_dim = dim * 4
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(hidden_dim, dim, bias=False)
-        self.w3 = nn.Linear(dim, hidden_dim, bias=False)
-
-    def forward(self, x_BLD: torch.Tensor) -> torch.Tensor:
-        return self.w2(F.silu(self.w1(x_BLD)) * self.w3(x_BLD))
-
-
-class Attention(nn.Module):
-    def __init__(self, dim: int, n_heads: int):
-        super().__init__()
-        self.n_heads = n_heads
-        self.dim = dim
-        self.head_dim = dim // n_heads
-        self.wq = nn.Linear(dim, dim, bias=False)
-        self.wk = nn.Linear(dim, dim, bias=False)
-        self.wv = nn.Linear(dim, dim, bias=False)
-        self.wo = nn.Linear(dim, dim, bias=False)
-
-        self.q_norm = nn.LayerNorm(dim)
-        self.k_norm = nn.LayerNorm(dim)
-
-    def forward(self, x_BLD: torch.Tensor, attn_mask: torch.Tensor, freq_cis: torch.Tensor) -> torch.Tensor:
-        B, L, _ = x_BLD.shape
-        dtype = x_BLD.dtype
-
-        xq_BLD = self.wq(x_BLD)
-        xk_BLD = self.wk(x_BLD)
-        xv_BLD = self.wv(x_BLD)
-
-        xq_BLD = self.q_norm(xq_BLD)
-        xk_BLD = self.k_norm(xk_BLD)
-
-        xq_BLD, xk_BLD = apply_rotary_emb(xq_BLD, xk_BLD, freq_cis)
-        xq_BLD = xq_BLD.to(dtype)
-        xk_BLD = xk_BLD.to(dtype)
-
-        xq_BHLK = xq_BLD.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)  # (bs, num_heads, L, head_dim)
-        xk_BHLK = xk_BLD.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
-        xv_BHLK = xv_BLD.view(B, L, self.n_heads, self.head_dim).transpose(1, 2)
-        out_BHLK = F.scaled_dot_product_attention(xq_BHLK, xk_BHLK, xv_BHLK, attn_mask=attn_mask).transpose(1, 2).reshape(B, L, self.dim)
-        return self.wo(out_BHLK)
-
-
 class TransformerBlock(nn.Module):
     def __init__(self, dim: int, n_heads: int):
         super().__init__()
         self.attention_norm = nn.LayerNorm(dim)
         self.attention = Attention(dim, n_heads)
         self.ffn_norm = nn.LayerNorm(dim)
-        self.ffn = FeedForward(dim, dim * 4)
+        self.ffn = FeedForwardGLU(dim)
         self.adaLN = nn.Sequential(
             nn.SiLU(),
             nn.Linear(dim, dim * 6, bias=True),

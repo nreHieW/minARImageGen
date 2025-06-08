@@ -99,3 +99,52 @@ class VectorQuantizer(nn.Module):
         h_BCHW = self.phis(h_BCHW, idx / (len(self.resolutions) - 1))
         f_hat_BCHW = f_hat_BCHW + h_BCHW
         return f_hat_BCHW
+
+
+class SimpleVectorQuantizer(nn.Module):
+    def __init__(self, vocab_size: int, dim: int):
+        super().__init__()
+        self.vocab_size = vocab_size
+        self.dim = dim
+        self.codebook = nn.Embedding(self.vocab_size, dim)
+        self.codebook.weight.data.uniform_(-1 / self.vocab_size, 1 / self.vocab_size)
+        self.codebook.weight.data = F.normalize(self.codebook.weight.data, dim=1)
+
+    def forward(self, f_BLD: torch.Tensor):
+        B, L, D = f_BLD.shape
+        idx_BL = self.encode(f_BLD)
+        f_hat_BLD = self.decode(idx_BL)
+
+        commitment_loss = F.mse_loss(f_BLD.detach(), f_hat_BLD)
+        codebook_loss = F.mse_loss(f_BLD, f_hat_BLD.detach())
+        vq_loss = codebook_loss + 0.25 * commitment_loss
+
+        f_hat_BLD = f_BLD + (f_hat_BLD - f_BLD).detach()
+
+        return f_hat_BLD, idx_BL, vq_loss
+
+    def encode(self, f_BLD: torch.Tensor):
+        B, L, D = f_BLD.shape
+
+        f_flat = f_BLD.reshape(-1, D)
+
+        f_norm = F.normalize(f_flat, dim=1)
+        codebook_norm = F.normalize(self.codebook.weight, dim=1)
+
+        dist = torch.matmul(f_norm, codebook_norm.t())
+
+        idx_BL = torch.argmax(dist, dim=1).view(B, L)
+
+        return idx_BL
+
+    def decode(self, idx_BL: torch.Tensor):
+        B, L = idx_BL.shape
+
+        f_hat_flat = self.codebook(idx_BL.view(-1))
+        f_hat_BLD = f_hat_flat.view(B, L, -1)
+
+        return f_hat_BLD
+
+    def get_codebook_entry(self, idx_BL: torch.Tensor):
+        """Get codebook entries without gradients (for inference)"""
+        return self.decode(idx_BL)

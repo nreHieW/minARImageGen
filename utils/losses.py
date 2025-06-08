@@ -1,4 +1,4 @@
-"""Stripped version of https://github.com/richzhang/PerceptualSimilarity/tree/master/models"""
+"""LPIPS from https://github.com/richzhang/PerceptualSimilarity/tree/master/models"""
 
 import os, hashlib
 import requests
@@ -6,6 +6,7 @@ from tqdm import tqdm
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import models
 from collections import namedtuple
 
@@ -166,3 +167,18 @@ def normalize_tensor(x, eps=1e-10):
 
 def spatial_average(x, keepdim=True):
     return x.mean([2, 3], keepdim=keepdim)
+
+class LeCAM_EMA:
+    def __init__(self, init=0., decay=0.999):
+        self.logits_real_ema = init
+        self.logits_fake_ema = init
+        self.decay = decay
+    
+    def update(self, logits_real, logits_fake):
+        self.logits_real_ema = self.logits_real_ema * self.decay + torch.mean(logits_real).item() * (1- self.decay) 
+        self.logits_fake_ema = self.logits_fake_ema * self.decay + torch.mean(logits_fake).item() * (1 - self.decay)
+    
+    def lecam_reg(self, real_pred, fake_pred):
+        reg = torch.mean(F.relu(real_pred - self.logits_fake_ema).pow(2)) + \
+                torch.mean(F.relu(self.logits_real_ema - fake_pred).pow(2))
+        return reg

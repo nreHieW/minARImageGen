@@ -17,7 +17,7 @@ from models.vqvae import VQVAE, VQVAEConfig
 from utils.evaluate.fid import calculate_fid_given_paths
 from utils.gan import NLayerDiscriminator, calculate_adaptive_weight, PatchDiscriminator
 from utils.imagenet_dataset import get_imagenet_dataloader
-from utils.lpips import LPIPS
+from utils.losses import LPIPS
 from transformers import get_cosine_schedule_with_warmup
 
 
@@ -157,7 +157,8 @@ def train(run_name: str):
                 recon_loss = F.mse_loss(xhat, image)
                 perceptual_loss = lpips_model(xhat, image).mean()
                 fake_pred = gan(xhat)
-                gan_loss = F.binary_cross_entropy_with_logits(fake_pred, torch.ones_like(fake_pred))
+                real_pred = gan(image).detach()
+                gan_loss = (real_pred - fake_pred - 0.1).relu().mean()
                 if global_step < args.gan_start_iter:
                     gan_loss *= 0
 
