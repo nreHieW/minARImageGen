@@ -3,26 +3,24 @@ import torch
 import torch.nn as nn
 from dataclasses import dataclass
 from diffusers import AutoencoderKL
-from layers import Attention, FeedForward, patchify, unpatchify, compute_freqs, modulate
-from quant import SimpleVectorQuantizer
+from .layers import Attention, FeedForward, patchify, unpatchify, compute_freqs, modulate
+from .quant import SimpleVectorQuantizer
 
 
 @dataclass
 class ImageTokenizerConfig:
     vae_path: str
-    model_dim: int = 256
-    num_heads: int = 12
-    rope_freq_base: float = 10000.0
-
-    height: int = 224  # height of vae latent
-    width: int = 224  # width of vae latent
-    patch_size: int = 16
-    quant_vocab_size: int = 1024
-    quant_dim: int = 256
-    num_registers: int = 256
-
-    num_encoder_layers: int = 1
-    num_decoder_layers: int = 1
+    model_dim: int
+    num_heads: int
+    rope_freq_base: float
+    height: int  # height of vae latent
+    width: int  # width of vae latent
+    patch_size: int
+    quant_vocab_size: int
+    quant_dim: int
+    num_registers: int
+    num_encoder_layers: int
+    num_decoder_layers: int
 
 
 class LastLayer(nn.Module):
@@ -150,7 +148,7 @@ class ImageTokenizer(nn.Module):
         self.vae = AutoencoderKL.from_pretrained(config.vae_path, subfolder="vae")
         self._disable_vae()
 
-        self.latent_dim = self.vae.config.latent_dim
+        self.latent_dim = self.vae.config.latent_channels
         self.encoder = Encoder(config)
         self.decoder = Decoder(config)
 
@@ -163,11 +161,12 @@ class ImageTokenizer(nn.Module):
 
         # bidirectional for patches, causal for registers
         self.total_seq_len = self.num_patches + self.num_registers
-        self.causal_attn_mask = torch.ones(self.total_seq_len, self.total_seq_len, dtype=torch.bool)
         causal_mask = torch.triu(torch.ones(self.num_registers, self.num_registers), diagonal=1).bool()
-        self.causal_attn_mask[self.num_patches :, self.num_patches :] = ~causal_mask
+        attn_mask = torch.ones(self.total_seq_len, self.total_seq_len, dtype=torch.bool)
+        attn_mask[self.num_patches :, self.num_patches :] = ~causal_mask
+        self.register_buffer("causal_attn_mask", attn_mask)
 
-        self.freqs = compute_freqs(theta=config.rope_freq_base, d_k=config.model_dim, max_seq_len=self.total_seq_len)
+        self.register_buffer("freqs", compute_freqs(theta=config.rope_freq_base, d_k=config.model_dim, max_seq_len=self.total_seq_len))
 
         self.quantizer = SimpleVectorQuantizer(vocab_size=config.quant_vocab_size, dim=config.quant_dim)
         self.pre_quant_proj = nn.Linear(config.model_dim, config.quant_dim)
@@ -245,7 +244,7 @@ class ImageTokenizer(nn.Module):
         idx_Br, vq_loss = self.encode(x_BCHW, num_tokens_to_use)
         x_BChw = self.decode(idx_Br, noised_latent_BCHW, t, num_tokens_to_use)
 
-        return x_BChw, vq_loss
+        return x_BChw, vq_loss, idx_Br
 
     def vae_encode(self, x_BCHW: torch.Tensor):
         x_BCHW = x_BCHW.to(self.vae.device)
@@ -274,5 +273,5 @@ if __name__ == "__main__":
     model = ImageTokenizer(dummy_config)
     x = torch.randn(1, 16, 32, 32)
     t = torch.randn((1,))
-    out, vq_loss = model(x, t, torch.randn_like(x), num_tokens_to_use=1)
+    out, vq_loss, idx_Br = model(x, t, torch.randn_like(x), num_tokens_to_use=1)
     assert out.shape == x.shape
