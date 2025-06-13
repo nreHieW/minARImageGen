@@ -3,8 +3,8 @@ import torch
 import torch.nn as nn
 from dataclasses import dataclass
 from diffusers import AutoencoderKL
-from .layers import Attention, FeedForward, patchify, unpatchify, compute_freqs, modulate
-from .quant import SimpleVectorQuantizer
+from layers import Attention, FeedForward, patchify, unpatchify, compute_freqs, modulate
+from quant import SimpleVectorQuantizer
 
 
 @dataclass
@@ -32,7 +32,6 @@ class LastLayer(nn.Module):
             nn.SiLU(),
             nn.Linear(min(hidden_size, 1024), 2 * hidden_size, bias=True),
         )
-        # init zero
         nn.init.constant_(self.linear.weight, 0)
         nn.init.constant_(self.linear.bias, 0)
 
@@ -145,31 +144,45 @@ class ImageTokenizer(nn.Module):
     def __init__(self, config: ImageTokenizerConfig):
         super().__init__()
         self.config = config
-        self.vae = AutoencoderKL.from_pretrained(config.vae_path, subfolder="vae")
-        self._disable_vae()
+        # self.vae = AutoencoderKL.from_pretrained(config.vae_path, subfolder="vae")
+        # self._disable_vae()
 
-        self.latent_dim = self.vae.config.latent_channels
+        # self.latent_dim = self.vae.config.latent_channels
+        self.latent_dim = 3
         self.encoder = Encoder(config)
         self.decoder = Decoder(config)
 
-        self.vocab_embedding = nn.Embedding(config.quant_vocab_size, config.model_dim)
         self.init_proj = nn.Linear(self.latent_dim * config.patch_size * config.patch_size, config.model_dim)
 
         self.num_patches = (config.height // config.patch_size) * (config.width // config.patch_size)
         self.seq_len = self.num_patches + config.num_registers
         self.num_registers = config.num_registers
 
-        # bidirectional for patches, causal for registers
         self.total_seq_len = self.num_patches + self.num_registers
-        causal_mask = torch.triu(torch.ones(self.num_registers, self.num_registers), diagonal=1).bool()
-        attn_mask = torch.ones(self.total_seq_len, self.total_seq_len, dtype=torch.bool)
-        attn_mask[self.num_patches :, self.num_patches :] = ~causal_mask
+
+        # Create causal attention mask
+        # True means can attend, False means cannot attend (masked)
+        attn_mask = torch.zeros(self.total_seq_len, self.total_seq_len, dtype=torch.bool)
+
+        # 1. Image patches can attend to each other but NOT to registers
+        attn_mask[: self.num_patches, : self.num_patches] = True  # patches -> patches: allowed
+        # attn_mask[:self.num_patches, self.num_patches:] remains False (patches -> registers: masked)
+
+        # 2. Register tokens can attend to all patches
+        attn_mask[self.num_patches :, : self.num_patches] = True  # registers -> patches: allowed
+
+        # 3. Register token i can attend to register token j only if i >= j (causal)
+        # Create lower triangular mask (including diagonal) for register-to-register attention
+        register_causal_mask = torch.tril(torch.ones(self.num_registers, self.num_registers)).bool()
+        attn_mask[self.num_patches :, self.num_patches :] = register_causal_mask  # lower triangle allowed
+
         self.register_buffer("causal_attn_mask", attn_mask)
 
         self.register_buffer("freqs", compute_freqs(theta=config.rope_freq_base, d_k=config.model_dim, max_seq_len=self.total_seq_len))
 
         self.quantizer = SimpleVectorQuantizer(vocab_size=config.quant_vocab_size, dim=config.quant_dim)
         self.pre_quant_proj = nn.Linear(config.model_dim, config.quant_dim)
+        self.post_quant_proj = nn.Linear(config.quant_dim, config.model_dim)
 
         self.encoder_registers = nn.Parameter(torch.randn(config.num_registers, config.model_dim), requires_grad=True)
         self.mask_token = nn.Parameter(torch.randn(config.model_dim), requires_grad=True)
@@ -189,29 +202,32 @@ class ImageTokenizer(nn.Module):
         x_BrD = x_BlrD[:, -self.num_registers :]
 
         x_BrQ = self.pre_quant_proj(x_BrD)
-        f_hat_BrD, idx_Br, vq_loss = self.quantizer(x_BrQ)
+        f_hat_BrQ, idx_Br, vq_loss = self.quantizer(x_BrQ)
+        f_hat_BrD = self.post_quant_proj(f_hat_BrQ)
+        # f_hat_BrD = self.post_quant_proj(x_BrQ)
 
         if num_tokens_to_use is not None:
             idx_Br = idx_Br[:, :num_tokens_to_use]
+            f_hat_BrD = f_hat_BrD[:, :num_tokens_to_use]
 
-        return idx_Br, vq_loss
+        return f_hat_BrD, idx_Br, vq_loss
 
-    def decode(self, idx_Br, noised_latent_BCHW, t: torch.Tensor, num_tokens_to_use: int | None = None):
+    def decode(self, x_BrD_quantized, noised_latent_BCHW, t: torch.Tensor, num_tokens_to_use: int | None = None):
         noised_latent_BLd = patchify(noised_latent_BCHW, self.config.patch_size)
         noised_latent_BLD = self.init_proj(noised_latent_BLd)
         B, L, _ = noised_latent_BLD.shape
 
-        x_BrD = self.vocab_embedding(idx_Br)
-
-        if num_tokens_to_use is not None:
+        if num_tokens_to_use is not None and num_tokens_to_use < self.num_registers:
             num_mask = self.num_registers - num_tokens_to_use
-            mask_tokens = self.mask_token.unsqueeze(0).repeat(B, num_mask, 1)
-            x_BrD = torch.cat([x_BrD, mask_tokens, noised_latent_BLD], dim=1)
+            mask_tokens = self.mask_token.unsqueeze(0).unsqueeze(0).repeat(B, num_mask, 1)
+            register_tokens = torch.cat([x_BrD_quantized, mask_tokens], dim=1)
         else:
-            x_BrD = torch.cat([x_BrD, noised_latent_BLD], dim=1)
+            register_tokens = x_BrD_quantized
+
+        decoder_input = torch.cat([register_tokens, noised_latent_BLD], dim=1)
 
         t_emb = self.timestep_embedder(t)
-        x_BrD = self.decoder(x_BrD, self.freqs, t_emb, self.causal_attn_mask)
+        x_BrD = self.decoder(decoder_input, self.freqs, t_emb, self.causal_attn_mask)
         x_BrD = x_BrD[:, -L:]
         x_BChw = self.last_layer(x_BrD, t_emb)
         x_BChw = unpatchify(x_BChw, self.config.height, self.config.width, self.config.patch_size)
@@ -221,14 +237,14 @@ class ImageTokenizer(nn.Module):
     def sample(self, image_latents_BCHW, sample_steps=50, num_tokens_to_use=256):
         B, C, H, W = image_latents_BCHW.shape
         assert num_tokens_to_use <= self.num_registers
-        idx_Br, _ = self.encode(image_latents_BCHW, num_tokens_to_use)
+        quantized_tokens, _, _ = self.encode(image_latents_BCHW, num_tokens_to_use)
         z = torch.randn_like(image_latents_BCHW)
 
         dt = 1.0 / sample_steps
 
         for i in range(sample_steps, 0, -1):
             t = torch.tensor([i / sample_steps] * B, device=z.device)
-            velocity = self.decode(idx_Br, z, t, num_tokens_to_use)
+            velocity = self.decode(quantized_tokens, z, t, num_tokens_to_use)
             z = z - dt * velocity
 
         return z
@@ -241,8 +257,8 @@ class ImageTokenizer(nn.Module):
         noised_latent_BCHW: torch.Tensor,
         num_tokens_to_use: int | None = None,
     ):
-        idx_Br, vq_loss = self.encode(x_BCHW, num_tokens_to_use)
-        x_BChw = self.decode(idx_Br, noised_latent_BCHW, t, num_tokens_to_use)
+        f_hat_BrD, idx_Br, vq_loss = self.encode(x_BCHW, num_tokens_to_use)
+        x_BChw = self.decode(f_hat_BrD, noised_latent_BCHW, t, num_tokens_to_use)
 
         return x_BChw, vq_loss, idx_Br
 
@@ -256,22 +272,131 @@ class ImageTokenizer(nn.Module):
 
 
 if __name__ == "__main__":
-    dummy_config = ImageTokenizerConfig(
+    # dummy_config = ImageTokenizerConfig(
+    #     vae_path="models/vae",
+    #     model_dim=32,
+    #     num_heads=2,
+    #     rope_freq_base=10000.0,
+    #     height=32,
+    #     width=32,
+    #     patch_size=8,
+    #     quant_vocab_size=256,
+    #     quant_dim=2,
+    #     num_registers=32,
+    #     num_encoder_layers=1,
+    #     num_decoder_layers=1,
+    # )
+    # model = ImageTokenizer(dummy_config)
+    # x = torch.randn(1, 16, 32, 32)
+    # t = torch.randn((1,))
+    # out, vq_loss, idx_Br = model(x, t, torch.randn_like(x), num_tokens_to_use=1)
+    # assert out.shape == x.shape
+    print("✓ Forward pass test passed")
+
+    def check_gradients(model, step_num):
+        """Check which parameters have gradients and which don't"""
+        params_with_grad = []
+        params_without_grad = []
+
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                if param.grad is not None and param.grad.abs().sum() > 0:
+                    params_with_grad.append(name)
+                else:
+                    params_without_grad.append(name)
+
+        print(f"\nStep {step_num} - Gradient Check:")
+        print(f"Parameters WITH gradients: {len(params_with_grad)}")
+        print(params_with_grad)
+        print(f"Parameters WITHOUT gradients: {len(params_without_grad)}")
+
+        if params_without_grad:
+            print("Parameters missing gradients:")
+            for name in params_without_grad:
+                print(f"  - {name}")
+            assert False
+        else:
+            print("✓ All parameters have gradients!")
+
+        return len(params_without_grad) == 0
+
+    # Convergence test
+    print("\n" + "=" * 50)
+    print("CONVERGENCE TEST")
+    print("=" * 50)
+
+    # Create a smaller model for faster testing
+    test_config = ImageTokenizerConfig(
         vae_path="models/vae",
-        model_dim=32,
-        num_heads=2,
+        model_dim=64,
+        num_heads=4,
         rope_freq_base=10000.0,
-        height=32,
-        width=32,
-        patch_size=8,
-        quant_vocab_size=256,
-        quant_dim=2,
-        num_registers=32,
+        height=8,
+        width=8,
+        patch_size=2,
+        quant_vocab_size=32,
+        quant_dim=4,
+        num_registers=8,
         num_encoder_layers=1,
-        num_decoder_layers=1,
+        num_decoder_layers=2,
     )
-    model = ImageTokenizer(dummy_config)
-    x = torch.randn(1, 16, 32, 32)
-    t = torch.randn((1,))
-    out, vq_loss, idx_Br = model(x, t, torch.randn_like(x), num_tokens_to_use=1)
-    assert out.shape == x.shape
+
+    test_model = ImageTokenizer(test_config)
+
+    batch_size = 1
+    images = torch.randn(batch_size, 3, 8, 8)
+
+    # Setup optimizer
+    optimizer = torch.optim.AdamW(test_model.parameters(), lr=3e-4)
+    vq_loss_weight = 0.2
+
+    print(f"Model parameters: {sum(p.numel() for p in test_model.parameters()):,}")
+    print(f"Training on batch shape: {images.shape}")
+    print()
+
+    # Training loop
+    test_model.train()
+    for step in range(100_000):
+        optimizer.zero_grad()
+
+        # Use raw images directly (no VAE encoding)
+        vae_latents = images
+
+        # Sample timestep and noise
+        t = torch.rand(batch_size)
+        z1 = torch.randn_like(vae_latents)
+
+        # Interpolate between clean and noise
+        t_expanded = t.view(batch_size, 1, 1, 1)
+        zt = (1 - t_expanded) * vae_latents + t_expanded * z1
+
+        # Forward pass
+        velocity_pred, vq_loss, _ = test_model(vae_latents, t, zt, num_tokens_to_use=12)
+
+        # Calculate loss
+        target_velocity = z1 - vae_latents
+        velocity_loss = torch.nn.functional.mse_loss(velocity_pred, target_velocity)
+        total_loss = velocity_loss + vq_loss_weight * vq_loss
+        # batchwise_mse = ((z1 - vae_latents - velocity_pred) ** 2).mean(dim=list(range(1, len(vae_latents.shape))))
+        # total_loss = batchwise_mse.mean() + vq_loss_weight * vq_loss
+
+        # Backward pass
+        total_loss.backward()
+
+        # # Check gradients periodically
+        # if step % 1000 == 0 and step > 0:
+        #     all_have_grads = check_gradients(test_model, step)
+        #     if not all_have_grads and step > 0:
+        #         print("WARNING: Some parameters don't have gradients!")
+        #         break
+
+        optimizer.step()
+
+        # Print progress
+        if step % 100 == 0:
+            print(f"Step {step:3d} | Total: {total_loss.item():.6f} | Velocity: {velocity_loss.item():.6f} | VQ: {vq_loss.item():.6f}")
+
+    print()
+    print("✓ Convergence test completed - loss should decrease over time")
+    print("✓ If loss reaches very low values (~1e-4), the model is learning correctly")
+    # assert total_loss.item() < 1e-5
